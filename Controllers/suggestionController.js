@@ -7,14 +7,15 @@ const getActivities = async (req, res) => {
     const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "deepseek/deepseek-chat-v3.1:free",
+        model: "deepseek/deepseek-chat", 
         messages: [
           {
             role: "system",
             content: `You are a helpful assistant. 
-            Always respond ONLY with a valid JSON array.
-            Each element must be an object with { "title": string, "description": string }.make the description short.
-            No explanations, no extra text, no markdown.`,
+Always respond ONLY with a valid JSON array.
+Each element must be an object with { "title": string, "description": string }. 
+Make the description short.
+No explanations, no extra text, no markdown.`,
           },
           { role: "user", content: prompt },
         ],
@@ -29,7 +30,10 @@ const getActivities = async (req, res) => {
       }
     );
 
-    const content = response.data?.choices?.[0]?.message?.content || "[]";
+    let content = response.data?.choices?.[0]?.message?.content || "[]";
+
+    // 🔹 Strip code blocks or backticks from AI output
+    content = content.replace(/```(json)?/g, "").trim();
 
     let activities = [];
     try {
@@ -42,7 +46,17 @@ const getActivities = async (req, res) => {
     res.status(200).json({ activities });
   } catch (error) {
     console.error("AI API Error:", error.response?.data || error.message);
-    res.status(200).json({ activities: [] });
+
+    // Always send a string message for frontend
+    const errorMsg =
+      error.response?.data?.error?.message ||
+      error.response?.data?.message ||
+      error.message;
+
+    res.status(200).json({
+      activities: [],
+      error: errorMsg,
+    });
   }
 };
 
