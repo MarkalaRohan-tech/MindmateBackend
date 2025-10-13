@@ -29,8 +29,10 @@ const registerUser = async (req, res) => {
     }
 
     return res.status(201).json({
+      success: true,
       message: "User registered successfully! Please log in.",
     });
+
   } catch (error) {
     console.error("Register error:", error);
     return res
