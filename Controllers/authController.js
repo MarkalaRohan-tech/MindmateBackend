@@ -8,36 +8,55 @@ const registerUser = async (req, res) => {
   const userData = req.body;
 
   try {
-    const exists = await User.findOne({ email: userData.email });
-    if (exists) {
+    // Check if user already exists
+    const existingUser = await User.findOne({
+      $or: [{ email: userData.email }, { username: userData.username }],
+    });
+
+    if (existingUser) {
+      const field =
+        existingUser.email === userData.email ? "Email" : "Username";
       return res.status(400).json({
-        message: "User email already exists! Try another email or login",
+        success: false,
+        message: `${field} already exists! Try another ${field.toLowerCase()} or login`,
       });
     }
 
-    // Create user
-    const newUser = await User.create(userData);
-
-    // Assign FIRST_SIGNUP badge only once
-    if (newUser.firstSignup) {
-      const badge = await Badge.findOne({ type: "FIRST_LOGIN" });
-      if (badge) {
-        newUser.badges.push(badge._id);
-      }
-      newUser.firstSignup = false;
-      await newUser.save();
-    }
+    // Create user (password will be hashed by pre-save hook)
+    await User.create(userData);
 
     return res.status(201).json({
       success: true,
       message: "User registered successfully! Please log in.",
     });
-
   } catch (error) {
-    console.error("Register error:", error);
-    return res
-      .status(500)
-      .json({ message: "Failed to register, Internal Server Error!" });
+    console.error("❌ Register error:", error);
+    console.error("Error details:", error.message);
+
+    // Handle mongoose validation errors
+    if (error.name === "ValidationError") {
+      const messages = Object.values(error.errors).map((e) => e.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(", "),
+      });
+    }
+
+    // Handle duplicate key errors
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        message: `${
+          field.charAt(0).toUpperCase() + field.slice(1)
+        } already exists`,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to register. Please try again.",
+    });
   }
 };
 
@@ -48,20 +67,32 @@ const loginUser = async (req, res) => {
   try {
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid password" });
+      return res.status(401).json({
+        success: false,
+        message: "Invalid password",
+      });
     }
 
-    // Award FIRST_CHECKIN badge if firstLogin
+    // Award badges on first login
     if (user.firstLogin) {
-      const badge = await Badge.findOne({ type: "FIRST_CHECKIN" });
-      if (badge) {
-        user.badges.push(badge._id);
+      const firstLoginBadge = await Badge.findOne({ type: "FIRST_LOGIN" });
+      const firstCheckinBadge = await Badge.findOne({ type: "FIRST_CHECKIN" });
+
+      if (firstLoginBadge && !user.badges.includes(firstLoginBadge._id)) {
+        user.badges.push(firstLoginBadge._id);
       }
+      if (firstCheckinBadge && !user.badges.includes(firstCheckinBadge._id)) {
+        user.badges.push(firstCheckinBadge._id);
+      }
+
       user.firstLogin = false;
       await user.save();
     }
@@ -77,15 +108,20 @@ const loginUser = async (req, res) => {
       maxAge: 60 * 60 * 1000,
     });
 
-    return res.status(200).json({ message: "Login successful", token });
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      token,
+    });
   } catch (error) {
-    console.error("Login error:", error);
-    return res
-      .status(500)
-      .json({ message: "Failed to login, Internal Server Error!" });
+    console.error("❌ Login error:", error);
+    console.error("Error details:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to login, Internal Server Error!",
+    });
   }
 };
-
 
 const addActivity = async (req, res) => {
   const { userId, activityId } = req.body;
