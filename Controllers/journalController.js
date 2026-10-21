@@ -1,30 +1,9 @@
-const AWS = require("aws-sdk");
+const Journal = require("../Models/Journal");
 const User = require("../Models/User");
 const checkAndAwardBadges = require("../Util/checkAndAwardBadges");
-
-// AWS S3 Configuration
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION || "ap-south-1",
-});
-
-const s3 = new AWS.S3();
-const BUCKET_NAME = process.env.S3_BUCKET_NAME;
-
-// Logging AWS config (without secrets)
-console.log("[AWS CONFIG]", {
-  region: process.env.AWS_REGION || "ap-south-1",
-  bucketName: BUCKET_NAME,
-  hasAccessKey: !!process.env.AWS_ACCESS_KEY_ID,
-  hasSecretKey: !!process.env.AWS_SECRET_ACCESS_KEY,
-});
+const mongoose = require("mongoose");
 
 // Helper Functions
-const generateS3Key = (userId, week, day, year = new Date().getFullYear()) => {
-  return `JournalLog/users/${userId}/${year}/week-${week}/${day.toLowerCase()}.json`;
-};
-
 const getCurrentWeek = () => {
   const now = new Date();
   const startOfYear = new Date(now.getFullYear(), 0, 1);
@@ -78,37 +57,30 @@ const saveJournalEntry = async (req, res) => {
         .status(400)
         .json({ success: false, error: "Missing required fields", missing });
 
-    const key = generateS3Key(userId, week, day);
-    const journalData = {
+    const journalKey = {
       userId,
+      year: Number(req.body.year) || new Date().getFullYear(),
       week: parseInt(week, 10),
       day,
-      content,
-      wordCount: parseInt(wordCount, 10) || 0,
-      characterCount: parseInt(characterCount, 10) || 0,
-      version: parseInt(version, 10),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
     };
+    let journalData = await Journal.findOne(journalKey);
 
-    // Save to S3
-    await s3
-      .putObject({
-        Bucket: BUCKET_NAME,
-        Key: key,
-        Body: JSON.stringify(journalData),
-        ContentType: "application/json",
-        Metadata: {
-          userId: userId.toString(),
-          week: week.toString(),
-          day,
-          year: new Date().getFullYear().toString(),
-          version: journalData.version.toString(),
-          "word-count": journalData.wordCount.toString(),
-          "character-count": journalData.characterCount.toString(),
-        },
-      })
-      .promise();
+    if (journalData) {
+      journalData.content = content;
+      journalData.wordCount = parseInt(wordCount, 10) || 0;
+      journalData.characterCount = parseInt(characterCount, 10) || 0;
+      journalData.version += 1;
+    } else {
+      journalData = new Journal({
+        ...journalKey,
+        content,
+        wordCount: parseInt(wordCount, 10) || 0,
+        characterCount: parseInt(characterCount, 10) || 0,
+        version: parseInt(version, 10) || 1,
+      });
+    }
+
+    await journalData.save();
 
     // Update user streak
     const user = await User.findById(userId);
@@ -131,48 +103,45 @@ const saveJournalEntry = async (req, res) => {
     res.status(200).json({ success: true, data: journalData });
   } catch (err) {
     console.error("Error saving journal:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to save journal",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to save journal",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
 const getJournalEntry = async (req, res) => {
   try {
     const { week, day } = req.params;
-    const { userId } = req.query;
+    const { userId, year = new Date().getFullYear() } = req.query;
 
     if (!userId)
       return res
         .status(401)
         .json({ success: false, error: "userId required in query parameters" });
 
-    const key = generateS3Key(userId, week, day);
-    const result = await s3
-      .getObject({ Bucket: BUCKET_NAME, Key: key })
-      .promise();
-    const journalData = JSON.parse(result.Body.toString());
+    const journalData = await Journal.findOne({
+      userId,
+      year: Number(year),
+      week: parseInt(week, 10),
+      day,
+    }).lean();
 
-    res.status(200).json({ success: true, data: journalData });
-  } catch (err) {
-    if (err.code === "NoSuchKey")
+    if (!journalData) {
       return res
         .status(404)
         .json({ success: false, message: "Journal entry not found" });
+    }
+
+    res.status(200).json({ success: true, data: journalData });
+  } catch (err) {
     console.error("Error retrieving journal:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to retrieve journal",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to retrieve journal",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
@@ -186,6 +155,8 @@ const getWeeklyJournals = async (req, res) => {
         .status(401)
         .json({ success: false, error: "userId required in query parameters" });
 
+    const numericWeek = parseInt(week, 10);
+    const numericYear = Number(year);
     const daysOfWeek = [
       "Monday",
       "Tuesday",
@@ -195,48 +166,41 @@ const getWeeklyJournals = async (req, res) => {
       "Saturday",
       "Sunday",
     ];
-    const journals = [];
-
-    for (const day of daysOfWeek) {
-      const key = generateS3Key(userId, week, day, year);
-      try {
-        const obj = await s3
-          .getObject({ Bucket: BUCKET_NAME, Key: key })
-          .promise();
-        const data = JSON.parse(obj.Body.toString());
-        journals.push({
-          day,
-          exists: true,
-          content: data.content,
-          wordCount: data.wordCount || 0,
-          characterCount: data.characterCount || 0,
-          createdAt: data.createdAt,
-          updatedAt: data.updatedAt,
-        });
-      } catch (err) {
-        if (err.code === "NoSuchKey")
-          journals.push({
+    const entries = await Journal.find({
+      userId,
+      week: numericWeek,
+      year: numericYear,
+    }).lean();
+    const entriesByDay = new Map(entries.map((entry) => [entry.day, entry]));
+    const journals = daysOfWeek.map((day) => {
+      const entry = entriesByDay.get(day);
+      return entry
+        ? {
+            day,
+            exists: true,
+            content: entry.content,
+            wordCount: entry.wordCount || 0,
+            characterCount: entry.characterCount || 0,
+            createdAt: entry.createdAt,
+            updatedAt: entry.updatedAt,
+          }
+        : {
             day,
             exists: false,
             content: null,
             wordCount: 0,
             characterCount: 0,
-          });
-        else throw err;
-      }
-    }
+          };
+    });
 
     res.status(200).json({ success: true, data: journals });
   } catch (err) {
     console.error("Error fetching weekly journals:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to fetch weekly journals",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch weekly journals",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
@@ -260,65 +224,40 @@ const updateJournalEntry = async (req, res) => {
         .status(400)
         .json({ success: false, error: "content is required" });
 
-    const key = generateS3Key(userId, week, day);
-    let existingEntry;
-    try {
-      const result = await s3
-        .getObject({ Bucket: BUCKET_NAME, Key: key })
-        .promise();
-      existingEntry = JSON.parse(result.Body.toString());
-    } catch (err) {
-      if (err.code === "NoSuchKey")
-        return res
-          .status(404)
-          .json({ success: false, message: "Journal entry not found" });
-      throw err;
+    const year = Number(req.body.year) || new Date().getFullYear();
+    const existingEntry = await Journal.findOne({
+      userId,
+      year,
+      week: parseInt(week, 10),
+      day,
+    });
+
+    if (!existingEntry) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Journal entry not found" });
     }
 
-    const updatedEntry = {
-      ...existingEntry,
-      content,
-      wordCount: parseInt(wordCount, 10) || 0,
-      characterCount: parseInt(characterCount, 10) || 0,
-      version: version ? parseInt(version, 10) : existingEntry.version + 1,
-      updatedAt: new Date().toISOString(),
-    };
+    existingEntry.content = content;
+    existingEntry.wordCount = parseInt(wordCount, 10) || 0;
+    existingEntry.characterCount = parseInt(characterCount, 10) || 0;
+    existingEntry.version = version
+      ? parseInt(version, 10)
+      : existingEntry.version + 1;
+    await existingEntry.save();
 
-    await s3
-      .putObject({
-        Bucket: BUCKET_NAME,
-        Key: key,
-        Body: JSON.stringify(updatedEntry),
-        ContentType: "application/json",
-        Metadata: {
-          userId: userId.toString(),
-          week: week.toString(),
-          day,
-          year: new Date().getFullYear().toString(),
-          version: updatedEntry.version.toString(),
-          "word-count": updatedEntry.wordCount.toString(),
-          "character-count": updatedEntry.characterCount.toString(),
-        },
-      })
-      .promise();
-
-    res
-      .status(200)
-      .json({
-        success: true,
-        message: "Journal updated successfully",
-        data: updatedEntry,
-      });
+    res.status(200).json({
+      success: true,
+      message: "Journal updated successfully",
+      data: existingEntry,
+    });
   } catch (err) {
     console.error("Error updating journal:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to update journal",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to update journal",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
@@ -332,54 +271,29 @@ const cleanupWeeklyData = async (req, res) => {
         .status(401)
         .json({ success: false, error: "userId required in query parameters" });
 
-    const days = [
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Friday",
-      "Saturday",
-      "Sunday",
-    ];
-    const deleteResults = await Promise.all(
-      days.map(async (day) => {
-        const key = generateS3Key(userId, week, day, year);
-        try {
-          await s3.deleteObject({ Bucket: BUCKET_NAME, Key: key }).promise();
-          return { day, success: true, key };
-        } catch (err) {
-          if (err.code === "NoSuchKey")
-            return { day, success: true, key, message: "File did not exist" };
-          return { day, success: false, key, error: err.message };
-        }
-      })
-    );
+    const result = await Journal.deleteMany({
+      userId,
+      week: parseInt(week, 10),
+      year: Number(year),
+    });
 
-    const successCount = deleteResults.filter((r) => r.success).length;
-    res
-      .status(200)
-      .json({
-        success: true,
-        message: `Week ${week} cleanup completed for user ${userId}`,
-        data: {
-          userId,
-          week: parseInt(week, 10),
-          year: parseInt(year, 10),
-          totalItems: days.length,
-          successfulDeletions: successCount,
-          results: deleteResults,
-        },
-      });
+    res.status(200).json({
+      success: true,
+      message: `Week ${week} cleanup completed for user ${userId}`,
+      data: {
+        userId,
+        week: parseInt(week, 10),
+        year: parseInt(year, 10),
+        deletedCount: result.deletedCount,
+      },
+    });
   } catch (err) {
     console.error("Error during cleanup:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to cleanup weekly journals",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to cleanup weekly journals",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
@@ -401,53 +315,33 @@ const searchJournals = async (req, res) => {
         .status(400)
         .json({ success: false, error: "userId and query are required" });
 
-    const days = [
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Friday",
-      "Saturday",
-      "Sunday",
-    ];
-    const results = [];
-
-    for (const day of days) {
-      try {
-        const key = generateS3Key(userId, week, day);
-        const obj = await s3
-          .getObject({ Bucket: BUCKET_NAME, Key: key })
-          .promise();
-        const data = JSON.parse(obj.Body.toString());
-        if (
-          data.content &&
-          data.content.toLowerCase().includes(query.toLowerCase())
-        )
-          results.push({
-            day,
-            match: true,
-            content: data.content,
-            wordCount: data.wordCount || 0,
-            characterCount: data.characterCount || 0,
-            createdAt: data.createdAt,
-            updatedAt: data.updatedAt,
-          });
-      } catch (err) {
-        if (err.code !== "NoSuchKey") throw err;
-      }
-    }
+    const entries = await Journal.find({
+      userId,
+      week: parseInt(week, 10),
+      year: Number(req.query.year) || new Date().getFullYear(),
+      content: {
+        $regex: query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        $options: "i",
+      },
+    }).lean();
+    const results = entries.map((entry) => ({
+      day: entry.day,
+      match: true,
+      content: entry.content,
+      wordCount: entry.wordCount || 0,
+      characterCount: entry.characterCount || 0,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    }));
 
     res.status(200).json({ success: true, data: results, query });
   } catch (err) {
     console.error("Error searching journals:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to search journals",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to search journals",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
@@ -474,12 +368,10 @@ const exportWeekData = async (req, res) => {
     await getWeeklyJournals(req, mockRes);
 
     if (!weeklyData || !weeklyData.success)
-      return res
-        .status(500)
-        .json({
-          success: false,
-          error: "Failed to retrieve weekly data for export",
-        });
+      return res.status(500).json({
+        success: false,
+        error: "Failed to retrieve weekly data for export",
+      });
 
     const exportData = {
       week: parseInt(week, 10),
@@ -493,27 +385,22 @@ const exportWeekData = async (req, res) => {
       res.setHeader("Content-Type", "application/json");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename=journal-week-${week}.json`
+        `attachment; filename=journal-week-${week}.json`,
       );
       return res.send(JSON.stringify(exportData, null, 2));
     } else {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Unsupported format. Only 'json' is supported currently.",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "Unsupported format. Only 'json' is supported currently.",
+      });
     }
   } catch (err) {
     console.error("Error exporting week data:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to export week data",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to export week data",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
@@ -541,12 +428,10 @@ const getJournalStats = async (req, res) => {
     await getWeeklyJournals(mockReq, mockRes);
 
     if (!weeklyData || !weeklyData.success)
-      return res
-        .status(500)
-        .json({
-          success: false,
-          error: "Failed to retrieve data for stats calculation",
-        });
+      return res.status(500).json({
+        success: false,
+        error: "Failed to retrieve data for stats calculation",
+      });
 
     const journals = weeklyData.data || [];
     const stats = journals.reduce(
@@ -564,7 +449,7 @@ const getJournalStats = async (req, res) => {
         totalEntries: 0,
         week: parseInt(week, 10),
         userId,
-      }
+      },
     );
 
     stats.averageWordsPerEntry =
@@ -579,51 +464,23 @@ const getJournalStats = async (req, res) => {
     res.status(200).json({ success: true, data: stats });
   } catch (err) {
     console.error("Error fetching stats:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: "Failed to fetch journal stats",
-        details:
-          process.env.NODE_ENV === "development" ? err.message : undefined,
-      });
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch journal stats",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
   }
 };
 
 const healthCheck = async (req, res) => {
-  try {
-    await s3.headBucket({ Bucket: BUCKET_NAME }).promise();
-    res
-      .status(200)
-      .json({
-        success: true,
-        status: "healthy",
-        timestamp: new Date().toISOString(),
-        service: "Journal Controller",
-        version: "1.0.0",
-        s3: {
-          connected: true,
-          bucket: BUCKET_NAME,
-          region: process.env.AWS_REGION || "ap-south-1",
-        },
-      });
-  } catch (err) {
-    console.error("Health check failed:", err);
-    res
-      .status(500)
-      .json({
-        success: false,
-        status: "unhealthy",
-        timestamp: new Date().toISOString(),
-        service: "Journal Controller",
-        error: err.message,
-        s3: {
-          connected: false,
-          bucket: BUCKET_NAME,
-          region: process.env.AWS_REGION || "ap-south-1",
-        },
-      });
-  }
+  const connected = mongoose.connection.readyState === 1;
+  res.status(connected ? 200 : 503).json({
+    success: connected,
+    status: connected ? "healthy" : "unhealthy",
+    timestamp: new Date().toISOString(),
+    service: "Journal Controller",
+    storage: "MongoDB",
+  });
 };
 
 // =========================

@@ -9,17 +9,28 @@ const DEFAULT_ROOM = "global";
  * Redis helpers
  * ------------------------------- */
 async function saveMessagesToRedisBatch(roomId, messages) {
-  if (!messages || messages.length === 0) return;
+  if (!client.isReady || !messages || messages.length === 0) return;
   const key = `chat:${roomId}`;
   const serialized = messages.map((m) => JSON.stringify(m));
-  await client.rPush(key, serialized); // batch push
-  await client.lTrim(key, -100, -1); // keep last 100
+  try {
+    await client.rPush(key, serialized);
+    await client.lTrim(key, -100, -1);
+  } catch (err) {
+    console.warn("Redis message cache write skipped:", err.message);
+  }
 }
 
 async function getMessagesFromRedis(roomId) {
+  if (!client.isReady) return [];
+
   const key = `chat:${roomId}`;
-  const items = await client.lRange(key, 0, -1);
-  return items.map((s) => JSON.parse(s));
+  try {
+    const items = await client.lRange(key, 0, -1);
+    return items.map((s) => JSON.parse(s));
+  } catch (err) {
+    console.warn("Redis message cache read skipped:", err.message);
+    return [];
+  }
 }
 
 async function getLatestFromDB(roomId, limit = 100) {
@@ -72,7 +83,7 @@ const fetchChats = async (req, res) => {
 
     // Save all messages to Redis in **one batch**
     saveMessagesToRedisBatch(roomId, dbMsgs).catch((err) =>
-      console.error("Redis batch save error:", err)
+      console.error("Redis batch save error:", err),
     );
 
     return res.json(dbMsgs);
@@ -100,16 +111,22 @@ const deleteChat = async (req, res) => {
     msg.deletedBy = userId;
     await msg.save();
 
-    // update Redis efficiently
-    const key = `chat:${DEFAULT_ROOM}`;
-    const items = await client.lRange(key, 0, -1);
-    for (let i = 0; i < items.length; i++) {
-      const obj = JSON.parse(items[i]);
-      if (obj._id === messageId) {
-        obj.deleted = true;
-        obj.deletedBy = userId;
-        await client.lSet(key, i, JSON.stringify(obj));
-        break;
+    // update Redis efficiently when the cache is available
+    if (client.isReady) {
+      try {
+        const key = `chat:${DEFAULT_ROOM}`;
+        const items = await client.lRange(key, 0, -1);
+        for (let i = 0; i < items.length; i++) {
+          const obj = JSON.parse(items[i]);
+          if (obj._id === messageId) {
+            obj.deleted = true;
+            obj.deletedBy = userId;
+            await client.lSet(key, i, JSON.stringify(obj));
+            break;
+          }
+        }
+      } catch (err) {
+        console.warn("Redis chat cache update skipped:", err.message);
       }
     }
 
@@ -121,15 +138,21 @@ const deleteChat = async (req, res) => {
 };
 
 async function updateRedisMessage(roomId, messageId, updates) {
+  if (!client.isReady) return;
+
   const key = `chat:${roomId}`;
-  const items = await client.lRange(key, 0, -1);
-  for (let i = 0; i < items.length; i++) {
-    const obj = JSON.parse(items[i]);
-    if (obj._id === messageId) {
-      const updated = { ...obj, ...updates };
-      await client.lSet(key, i, JSON.stringify(updated));
-      break;
+  try {
+    const items = await client.lRange(key, 0, -1);
+    for (let i = 0; i < items.length; i++) {
+      const obj = JSON.parse(items[i]);
+      if (obj._id === messageId) {
+        const updated = { ...obj, ...updates };
+        await client.lSet(key, i, JSON.stringify(updated));
+        break;
+      }
     }
+  } catch (err) {
+    console.warn("Redis message cache update skipped:", err.message);
   }
 }
 
@@ -150,7 +173,7 @@ const computeCommunityStreak = (messages) => {
   // Get all unique message dates (UTC day)
   let allDates = [
     ...new Set(
-      messages.map((m) => new Date(m.createdAt).toISOString().split("T")[0])
+      messages.map((m) => new Date(m.createdAt).toISOString().split("T")[0]),
     ),
   ]
     .sort((a, b) => new Date(b) - new Date(a))
@@ -176,7 +199,6 @@ const computeCommunityStreak = (messages) => {
 
   return streak;
 };
-
 
 module.exports = {
   fetchChats,

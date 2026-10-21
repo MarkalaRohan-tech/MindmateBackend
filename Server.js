@@ -11,7 +11,7 @@ const User = require("./Models/User");
 const Message = require("./Models/Message");
 
 // Util
-const  {scheduleWeeklyCleanup}  = require("./Util/JounralCleanUp");
+const { scheduleWeeklyCleanup } = require("./Util/JounralCleanUp");
 const { checkAndAwardBadges } = require("./Util/checkAndAwardBadges");
 const { client: redisClient, connectRedis } = require("./Config/redisClient");
 const {
@@ -110,10 +110,10 @@ cron.schedule(
           "selfCareActivities.$[].weeklyCount": 0,
           "selfCareActivities.$[].lastPerformed": null,
         },
-      }
+      },
     );
   },
-  { timezone: "Asia/Kolkata" }
+  { timezone: "Asia/Kolkata" },
 );
 
 // =======================
@@ -129,8 +129,12 @@ async function start() {
     console.log("✅ MongoDB connected");
 
     // Redis
-    await connectRedis();
-    console.log("✅ Redis connected");
+    const redisConnected = await connectRedis();
+    console.log(
+      redisConnected
+        ? "✅ Redis connected"
+        : "⚠️ Redis unavailable; continuing without Redis-backed chat caching",
+    );
 
     // Socket.IO
     const io = new Server(server, {
@@ -140,6 +144,8 @@ async function start() {
 
     // Deliver offline messages
     async function deliverOfflineMessages(userId, socket) {
+      if (!redisClient.isReady) return;
+
       const key = `offline:${userId}`;
       const messages = await redisClient.lRange(key, 0, -1);
       if (messages && messages.length > 0) {
@@ -171,7 +177,7 @@ async function start() {
             const newMsg = await Message.create({ senderId, content });
             const populated = await newMsg.populate(
               "senderId",
-              "username fullname"
+              "username fullname",
             );
             const serializable = populated.toObject
               ? populated.toObject()
@@ -191,7 +197,7 @@ async function start() {
               await user.save().catch((err) => {
                 console.error(
                   "Error saving user after incrementing streak:",
-                  err
+                  err,
                 );
               });
 
@@ -202,7 +208,7 @@ async function start() {
                 await user.save().catch((err) => {
                   console.error(
                     "Error saving user after awarding badges:",
-                    err
+                    err,
                   );
                 });
               } catch (badgeErr) {
@@ -212,7 +218,7 @@ async function start() {
           } catch (err) {
             console.error("chat message error", err);
           }
-        }
+        },
       );
 
       // Delete message event
@@ -239,14 +245,14 @@ async function start() {
             if (user) {
               user.communityEngagementStreak = Math.max(
                 (user.communityEngagementStreak || 0) - 1,
-                0
+                0,
               );
 
               // Save decrement first
               await user.save().catch((err) => {
                 console.error(
                   "Error saving user after decrementing streak:",
-                  err
+                  err,
                 );
               });
 
@@ -263,12 +269,13 @@ async function start() {
           } catch (err) {
             console.error("delete message error", err);
           }
-        }
+        },
       );
 
       // Last seen
       socket.on("last seen", async ({ userId, lastMessageId }) => {
         if (!userId || !lastMessageId) return;
+        if (!redisClient.isReady) return;
         try {
           await redisClient.set(`lastSeen:${userId}`, String(lastMessageId));
         } catch (e) {
