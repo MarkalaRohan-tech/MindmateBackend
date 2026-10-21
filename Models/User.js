@@ -65,8 +65,6 @@ const userSchema = new mongoose.Schema({
 
   communityEngagementStreak: { type: Number, default: 0 },
 
-  lastJournalSaved: { type: Date, default: null },
-
 });
 
 userSchema.pre("save", async function (next) {

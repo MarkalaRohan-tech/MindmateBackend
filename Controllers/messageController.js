@@ -75,21 +75,29 @@ const fetchChats = async (req, res) => {
     }
 
     // First load or "latest messages"
+    // First load or "latest messages"
+    // First load or "latest messages"
     const cached = await getMessagesFromRedis(roomId);
-    if (cached && cached.length > 0) return res.json(cached);
+    if (cached.length >= 100) return res.json(cached);
 
-    // Redis empty → fetch from DB
+    // Cache is empty or partial → read from DB and refill the cache
     const dbMsgs = await getLatestFromDB(roomId, 100);
 
-    // Save all messages to Redis in **one batch**
-    saveMessagesToRedisBatch(roomId, dbMsgs).catch((err) =>
-      console.error("Redis batch save error:", err),
-    );
+    if (client.isReady) {
+      try {
+        await client.del(`chat:${roomId}`);
+      } catch (e) {
+        console.warn("Redis cache reset skipped:", e.message);
+      }
+      saveMessagesToRedisBatch(roomId, dbMsgs).catch((err) =>
+        console.error("Redis batch save error:", err),
+      );
+    }
 
     return res.json(dbMsgs);
   } catch (err) {
-    console.error("fetchChats error", err);
-    res.status(500).json({ error: err.message });
+    console.error("Error fetching messages:", err);
+    return res.status(500).json({ error: "Error fetching messages" });
   }
 };
 
